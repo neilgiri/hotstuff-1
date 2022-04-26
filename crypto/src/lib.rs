@@ -10,12 +10,15 @@ use std::convert::{TryFrom, TryInto};
 use std::fmt;
 use tokio::sync::mpsc::{channel, Sender};
 use tokio::sync::oneshot;
+//use bls_eth_rust::*;
 
 #[cfg(test)]
 #[path = "tests/crypto_tests.rs"]
 pub mod crypto_tests;
 
 pub type CryptoError = ed25519::Error;
+pub static KEY_TYPE: u32 = 0; // 0 represents ED25519, 1 represents BLS
+
 
 /// Represents a hash digest (32 bytes).
 #[derive(Hash, PartialEq, Default, Eq, Clone, Deserialize, Serialize, Ord, PartialOrd)]
@@ -62,19 +65,33 @@ pub trait Hash {
 }
 
 /// Represents a public key (in bytes).
-#[derive(Copy, Clone, Eq, PartialEq, Hash, Ord, PartialOrd, Default)]
-pub struct PublicKey(pub [u8; 32]);
+#[derive(Copy, Clone, Eq, PartialEq, Hash, Ord, PartialOrd)]
+pub struct PublicKey(pub [u8; 48]);
 
 impl PublicKey {
     pub fn encode_base64(&self) -> String {
-        base64::encode(&self.0[..])
+        match KEY_TYPE {
+            0 => base64::encode(&self.0[..32]),
+            1 => base64::encode(&self.0[..]),
+            _ => String::new(),
+        }
     }
 
     pub fn decode_base64(s: &str) -> Result<Self, base64::DecodeError> {
         let bytes = base64::decode(s)?;
-        let array = bytes[..32]
+        let array: [u8; 48] = match KEY_TYPE {
+            0 => bytes[..32]
             .try_into()
-            .map_err(|_| base64::DecodeError::InvalidLength)?;
+            .map_err(|_| base64::DecodeError::InvalidLength)?,
+            1 => bytes[..]
+            .try_into()
+            .map_err(|_| base64::DecodeError::InvalidLength)?,
+            _ => [0; 48],
+        };
+
+        /*let array = bytes[..32]
+            .try_into()
+            .map_err(|_| base64::DecodeError::InvalidLength)?;*/
         Ok(Self(array))
     }
 }
@@ -122,15 +139,33 @@ pub struct SecretKey([u8; 64]);
 
 impl SecretKey {
     pub fn encode_base64(&self) -> String {
-        base64::encode(&self.0[..])
+        match KEY_TYPE {
+            0 => base64::encode(&self.0[..]),
+            1 => base64::encode(&self.0[..32]),
+            _ => String::new(),
+        }
     }
 
     pub fn decode_base64(s: &str) -> Result<Self, base64::DecodeError> {
         let bytes = base64::decode(s)?;
+
+        let array: [u8; 64] = match KEY_TYPE {
+            0 => bytes[..]
+            .try_into()
+            .map_err(|_| base64::DecodeError::InvalidLength)?,
+            1 => bytes[..32]
+            .try_into()
+            .map_err(|_| base64::DecodeError::InvalidLength)?,
+            _ => [0; 64],
+        };
+
+        Ok(Self(array))
+
+        /*let bytes = base64::decode(s)?;
         let array = bytes[..64]
             .try_into()
             .map_err(|_| base64::DecodeError::InvalidLength)?;
-        Ok(Self(array))
+        Ok(Self(array))*/
     }
 }
 
@@ -168,10 +203,28 @@ pub fn generate_keypair<R>(csprng: &mut R) -> (PublicKey, SecretKey)
 where
     R: CryptoRng + RngCore,
 {
-    let keypair = dalek::Keypair::generate(csprng);
-    let public = PublicKey(keypair.public.to_bytes());
-    let secret = SecretKey(keypair.to_bytes());
-    (public, secret)
+    match KEY_TYPE {
+        0 => {
+            let keypair = dalek::Keypair::generate(csprng);
+            let mut pub_buf = [0; 48];
+            pub_buf[..32].copy_from_slice(&keypair.public.to_bytes());
+            let public = PublicKey(pub_buf);
+            let secret = SecretKey(keypair.to_bytes());
+            (public, secret)
+        },
+
+        1 => {
+            let mut sec: bls_eth_rust::SecretKey = unsafe { bls_eth_rust::SecretKey::uninit() };
+            sec.set_by_csprng();
+            let pub_key: bls_eth_rust::PublicKey = sec.get_publickey();
+
+            let public = PublicKey(pub_key.serialize().try_into().expect("incorrect public key length"));
+            let secret = SecretKey(sec.serialize().try_into().expect("incorrect secret key length"));
+            (public, secret)
+        },
+
+        _ => (PublicKey([0; 48]), SecretKey([0; 64])),
+    }
 }
 
 /// Represents an ed25519 signature.
