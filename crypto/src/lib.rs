@@ -227,20 +227,35 @@ where
     }
 }
 
-/// Represents an ed25519 signature.
-#[derive(Serialize, Deserialize, Clone, Default, Debug)]
+/// Represents an ed25519/BLS signature.
+#[derive(Clone, Debug)]
 pub struct Signature {
-    part1: [u8; 32],
-    part2: [u8; 32],
+    part1: [u8; 48],
+    part2: [u8; 48], // BLS signatures are 96 bytes
 }
 
 impl Signature {
     pub fn new(digest: &Digest, secret: &SecretKey) -> Self {
-        let keypair = dalek::Keypair::from_bytes(&secret.0).expect("Unable to load secret key");
-        let sig = keypair.sign(&digest.0).to_bytes();
-        let part1 = sig[..32].try_into().expect("Unexpected signature length");
-        let part2 = sig[32..64].try_into().expect("Unexpected signature length");
-        Signature { part1, part2 }
+        match KEY_TYPE {
+            0 => {
+                let keypair = dalek::Keypair::from_bytes(&secret.0).expect("Unable to load secret key");
+                let sig = keypair.sign(&digest.0).to_bytes();
+                let part1 = sig[..32].try_into().expect("Unexpected signature length");
+                let part2 = sig[32..64].try_into().expect("Unexpected signature length");
+                Signature { part1, part2 }
+            },
+
+            1 => {
+                let mut secret_key: bls_eth_rust::SecretKey = unsafe { bls_eth_rust::SecretKey::uninit() };
+                secret_key.deserialize(&secret.0);
+                let sig = secret_key.sign(&digest.0).serialize();
+                let part1 = sig[..48].try_into().expect("incorrect length");
+                let part2 = sig[48..96].try_into().expect("incorrect length");
+                Signature {part1, part2}
+            },
+
+            _ => Signature {part1: [0; 48], part2: [0; 48]}
+        }
     }
 
     fn flatten(&self) -> [u8; 64] {
@@ -251,9 +266,26 @@ impl Signature {
     }
 
     pub fn verify(&self, digest: &Digest, public_key: &PublicKey) -> Result<(), CryptoError> {
-        let signature = ed25519::signature::Signature::from_bytes(&self.flatten())?;
-        let key = dalek::PublicKey::from_bytes(&public_key.0)?;
-        key.verify_strict(&digest.0, &signature)
+        match KEY_TYPE {
+            0 => {
+                let signature = ed25519::signature::Signature::from_bytes(&self.flatten())?;
+                let key = dalek::PublicKey::from_bytes(&public_key.0)?;
+                key.verify_strict(&digest.0, &signature)
+            },
+
+            1 => {
+                let mut signature: bls_eth_rust::Signature = unsafe { bls_eth_rust::Signature::uninit() };
+                signature.deserialize(&self.flatten());
+                let mut key: bls_eth_rust::PublicKey = unsafe { bls_eth_rust::PublicKey::uninit() };
+                key.deserialize(&public_key.0);
+                match signature.verify(&key, &digest.0) {
+                    true => Ok(()),
+                    false => Err(dalek::SignatureError::new()),
+                }
+            },
+
+            _ => Err(dalek::SignatureError::new()),
+        }
     }
 
     pub fn verify_batch<'a, I>(digest: &Digest, votes: I) -> Result<(), CryptoError>
@@ -261,14 +293,46 @@ impl Signature {
         I: IntoIterator<Item = &'a (PublicKey, Signature)>,
     {
         let mut messages: Vec<&[u8]> = Vec::new();
-        let mut signatures: Vec<dalek::Signature> = Vec::new();
-        let mut keys: Vec<dalek::PublicKey> = Vec::new();
-        for (key, sig) in votes.into_iter() {
-            messages.push(&digest.0[..]);
-            signatures.push(ed25519::signature::Signature::from_bytes(&sig.flatten())?);
-            keys.push(dalek::PublicKey::from_bytes(&key.0)?);
+
+        match KEY_TYPE {
+            0 => {
+                let mut signatures: Vec<dalek::Signature> = Vec::new();
+                let mut keys: Vec<dalek::PublicKey> = Vec::new();
+                for (key, sig) in votes.into_iter() {
+                    messages.push(&digest.0[..]);
+                    signatures.push(ed25519::signature::Signature::from_bytes(&sig.flatten())?);
+                    keys.push(dalek::PublicKey::from_bytes(&key.0)?);
+                }
+                dalek::verify_batch(&messages[..], &signatures[..], &keys[..])
+            },
+
+            1 => {
+                let mut signatures: Vec<bls_eth_rust::Signature> = Vec::new();
+                let mut keys: Vec<bls_eth_rust::PublicKey> = Vec::new();
+                let mut agg_signature: bls_eth_rust::Signature = unsafe { bls_eth_rust::Signature::uninit() };
+
+
+                for (key, sig) in votes.into_iter() {
+
+                    let mut signature: bls_eth_rust::Signature = unsafe { bls_eth_rust::Signature::uninit() };
+                    signature.deserialize(&sig.flatten());
+                    let mut key_bls: bls_eth_rust::PublicKey = unsafe { bls_eth_rust::PublicKey::uninit() };
+                    key_bls.deserialize(&key.0);
+
+                    signatures.push(signature);
+                    keys.push(key_bls);
+                }
+
+                agg_signature.aggregate(signatures.as_slice());
+                match agg_signature.fast_aggregate_verify(keys.as_slice(), &digest.0[..]) {
+                    true => Ok(()),
+                    false => Err(dalek::SignatureError::new()),
+                }
+            },
+
+            _ => Err(dalek::SignatureError::new()),
+
         }
-        dalek::verify_batch(&messages[..], &signatures[..], &keys[..])
     }
 }
 
