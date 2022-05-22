@@ -10,6 +10,7 @@ use std::convert::{TryFrom, TryInto};
 use std::fmt;
 use tokio::sync::mpsc::{channel, Sender};
 use tokio::sync::oneshot;
+use serde_big_array::BigArray;
 //use bls_eth_rust::*;
 
 #[cfg(test)]
@@ -105,6 +106,12 @@ impl fmt::Debug for PublicKey {
 impl fmt::Display for PublicKey {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
         write!(f, "{}", self.encode_base64().get(0..16).unwrap())
+    }
+}
+
+impl Default for PublicKey {
+    fn default() -> Self {
+        PublicKey {0: [0; 48]}
     }
 }
 
@@ -240,16 +247,33 @@ where
 }
 
 /// Represents an ed25519/BLS signature.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Signature {
+    #[serde(with = "BigArray")]
     part1: [u8; 48],
+    #[serde(with = "BigArray")]
     part2: [u8; 48], // BLS signatures are 96 bytes
 }
 
 impl Signature {
-    pub fn default() -> Self {
-        Signature {part1: [0; 48], part2: [0; 48]}
-    }
+    /*fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: ser::Serializer,
+    {
+        serializer.serialize_bytes(&[self.part1, self.part2].concat().try_into().expect("unexpected length"));
+        serializer.serialize_bytes(&self.part2)
+        //serializer.serialize_str(&self.encode_base64())
+    }*/
+
+    /*fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: de::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        let value = Self::decode_base64(&s).map_err(|e| de::Error::custom(e.to_string()))?;
+        Ok(value)
+    }*/
+
 
     pub fn new(digest: &Digest, secret: &SecretKey) -> Self {
         match KEY_TYPE {
@@ -365,6 +389,13 @@ impl Signature {
         }
     }
 }
+
+impl Default for Signature {
+    fn default() -> Self {
+        Signature {part1: [0; 48], part2: [0; 48]}
+    }
+}
+
 
 /// This service holds the node's private key. It takes digests as input and returns a signature
 /// over the digest (through a oneshot channel).

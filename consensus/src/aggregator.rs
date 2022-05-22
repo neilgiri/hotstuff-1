@@ -80,11 +80,12 @@ impl QCMaker {
             ConsensusError::AuthorityReuse(author)
         );
 
+        let digest = vote.digest();
         self.votes.push((author, vote.signature));
         self.weight += committee.stake(&author);
         if self.weight >= committee.quorum_threshold() {
             // Verify batch of signatures
-            let verify = Signature::verify_batch(&vote.digest(), &self.votes);
+            let verify = Signature::verify_batch(&digest, &self.votes);
             if verify.is_ok() {
                 self.weight = 0; // Ensures QC is only made once.
                 return Ok(Some(QC {
