@@ -208,7 +208,7 @@ impl Core {
         }
 
         // Ensure the vote is well formed.
-        vote.verify(&self.committee)?;
+        //vote.verify(&self.committee)?;
 
         // Add the new vote to our aggregator and see if we have a quorum.
         if let Some(qc) = self.aggregator.add_vote(vote.clone())? {

@@ -83,12 +83,23 @@ impl QCMaker {
         self.votes.push((author, vote.signature));
         self.weight += committee.stake(&author);
         if self.weight >= committee.quorum_threshold() {
-            self.weight = 0; // Ensures QC is only made once.
+            // Verify batch of signatures
+            let verify = Signature::verify_batch(&vote.digest(), &self.votes);
+            if verify.is_ok() {
+                self.weight = 0; // Ensures QC is only made once.
+                return Ok(Some(QC {
+                    hash: vote.hash.clone(),
+                    round: vote.round,
+                    votes: self.votes.clone(),
+                }));
+            }
+
+            /*self.weight = 0; // Ensures QC is only made once.
             return Ok(Some(QC {
                 hash: vote.hash.clone(),
                 round: vote.round,
                 votes: self.votes.clone(),
-            }));
+            }));*/
         }
         Ok(None)
     }

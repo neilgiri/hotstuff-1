@@ -17,7 +17,9 @@ use tokio::sync::oneshot;
 pub mod crypto_tests;
 
 pub type CryptoError = ed25519::Error;
-pub static KEY_TYPE: u32 = 0; // 0 represents ED25519, 1 represents BLS
+
+// 0 represents ED25519, 1 represents BLS
+pub static KEY_TYPE: u32 = 1; 
 
 
 /// Represents a hash digest (32 bytes).
@@ -79,14 +81,12 @@ impl PublicKey {
 
     pub fn decode_base64(s: &str) -> Result<Self, base64::DecodeError> {
         let bytes = base64::decode(s)?;
-        let array: [u8; 48] = match KEY_TYPE {
-            0 => bytes[..32]
-            .try_into()
-            .map_err(|_| base64::DecodeError::InvalidLength)?,
-            1 => bytes[..]
-            .try_into()
-            .map_err(|_| base64::DecodeError::InvalidLength)?,
-            _ => [0; 48],
+
+        let mut array: [u8; 48] = [0; 48];
+        match KEY_TYPE {
+            0 => array[..32].copy_from_slice(&bytes[..32]),
+            1 => array.copy_from_slice(&bytes),
+            _ => (), 
         };
 
         /*let array = bytes[..32]
@@ -149,7 +149,15 @@ impl SecretKey {
     pub fn decode_base64(s: &str) -> Result<Self, base64::DecodeError> {
         let bytes = base64::decode(s)?;
 
-        let array: [u8; 64] = match KEY_TYPE {
+        let mut array: [u8; 64] = [0; 64];
+        match KEY_TYPE {
+            0 => array.copy_from_slice(&bytes),
+            1 => array[..32].copy_from_slice(&bytes[..32]),
+            _ => (), 
+        };
+
+
+        /*let array: [u8; 64] = match KEY_TYPE {
             0 => bytes[..]
             .try_into()
             .map_err(|_| base64::DecodeError::InvalidLength)?,
@@ -157,7 +165,7 @@ impl SecretKey {
             .try_into()
             .map_err(|_| base64::DecodeError::InvalidLength)?,
             _ => [0; 64],
-        };
+        };*/
 
         Ok(Self(array))
 
@@ -217,9 +225,13 @@ where
             let mut sec: bls_eth_rust::SecretKey = unsafe { bls_eth_rust::SecretKey::uninit() };
             sec.set_by_csprng();
             let pub_key: bls_eth_rust::PublicKey = sec.get_publickey();
-
             let public = PublicKey(pub_key.serialize().try_into().expect("incorrect public key length"));
-            let secret = SecretKey(sec.serialize().try_into().expect("incorrect secret key length"));
+
+            let mut sec_buf: [u8; 64] = [0; 64];
+            sec_buf[..32].copy_from_slice(sec.serialize().as_slice());
+            let secret = SecretKey(sec_buf);
+
+            //let secret = SecretKey(sec.serialize().try_into().expect("incorrect secret key length"));
             (public, secret)
         },
 
@@ -235,22 +247,40 @@ pub struct Signature {
 }
 
 impl Signature {
+    pub fn default() -> Self {
+        Signature {part1: [0; 48], part2: [0; 48]}
+    }
+
     pub fn new(digest: &Digest, secret: &SecretKey) -> Self {
         match KEY_TYPE {
             0 => {
-                let keypair = dalek::Keypair::from_bytes(&secret.0).expect("Unable to load secret key");
+                let keypair = dalek::Keypair::from_bytes(&secret.0[..]).expect("Unable to load secret key");
                 let sig = keypair.sign(&digest.0).to_bytes();
-                let part1 = sig[..32].try_into().expect("Unexpected signature length");
-                let part2 = sig[32..64].try_into().expect("Unexpected signature length");
+
+                let mut part1: [u8; 48] = [0; 48];
+                let mut part2: [u8; 48] = [0; 48];
+
+                part1[..48].copy_from_slice(&sig[..48]);
+                part2[..16].copy_from_slice(&sig[48..64]);
+
+                /*let part1 = sig[..32].try_into().expect("Unexpected signature length");
+                let part2 = sig[32..64].try_into().expect("Unexpected signature length");*/
                 Signature { part1, part2 }
             },
 
             1 => {
                 let mut secret_key: bls_eth_rust::SecretKey = unsafe { bls_eth_rust::SecretKey::uninit() };
-                secret_key.deserialize(&secret.0);
+                secret_key.deserialize(&secret.0[..32]);
                 let sig = secret_key.sign(&digest.0).serialize();
-                let part1 = sig[..48].try_into().expect("incorrect length");
-                let part2 = sig[48..96].try_into().expect("incorrect length");
+
+                let mut part1: [u8; 48] = [0; 48];
+                let mut part2: [u8; 48] = [0; 48];
+
+                part1.copy_from_slice(&sig[..48]);
+                part2.copy_from_slice(&sig[48..96]);
+
+                //let part1 = sig[..48].try_into().expect("incorrect length");
+                //let part2 = sig[48..96].try_into().expect("incorrect length");
                 Signature {part1, part2}
             },
 
@@ -258,7 +288,7 @@ impl Signature {
         }
     }
 
-    fn flatten(&self) -> [u8; 64] {
+    fn flatten(&self) -> [u8; 96] {
         [self.part1, self.part2]
             .concat()
             .try_into()
@@ -268,8 +298,8 @@ impl Signature {
     pub fn verify(&self, digest: &Digest, public_key: &PublicKey) -> Result<(), CryptoError> {
         match KEY_TYPE {
             0 => {
-                let signature = ed25519::signature::Signature::from_bytes(&self.flatten())?;
-                let key = dalek::PublicKey::from_bytes(&public_key.0)?;
+                let signature = ed25519::signature::Signature::from_bytes(&self.flatten()[..64])?;
+                let key = dalek::PublicKey::from_bytes(&public_key.0[..32])?;
                 key.verify_strict(&digest.0, &signature)
             },
 
@@ -300,8 +330,8 @@ impl Signature {
                 let mut keys: Vec<dalek::PublicKey> = Vec::new();
                 for (key, sig) in votes.into_iter() {
                     messages.push(&digest.0[..]);
-                    signatures.push(ed25519::signature::Signature::from_bytes(&sig.flatten())?);
-                    keys.push(dalek::PublicKey::from_bytes(&key.0)?);
+                    signatures.push(ed25519::signature::Signature::from_bytes(&sig.flatten()[..64])?);
+                    keys.push(dalek::PublicKey::from_bytes(&key.0[..32])?);
                 }
                 dalek::verify_batch(&messages[..], &signatures[..], &keys[..])
             },
